@@ -189,6 +189,34 @@ cd /Users/snow/accio-anthropic-bridge
 npm start
 ```
 
+`npm start` 现在会先检查仓库根目录下是否已有 `.env`：
+
+- 没有 `.env` 时，自动执行一次 `npm run setup`
+- 已有 `.env` 时，直接启动，不覆盖你手工改过的配置
+
+`npm run setup` 和 `npm run init-env` 等价，都会自动扫描本机 `~/.accio`，生成当前机器专用的 `.env`。
+
+脚本优先级如下：
+
+1. 如果本地 Accio 网关 `http://127.0.0.1:4097` 可访问，优先读取当前登录态
+2. 如果本地网关暂时不可访问，再回退到 `~/.accio/accounts/*` 的最近活跃账号、最近 session、最近 workspace 进行推断
+
+所以大多数场景下，不需要手工填这些 `ACCIO_*` 环境变量。
+
+如果你只想预览自动发现结果、不写入文件：
+
+```bash
+npm run init-env -- --print
+```
+
+如果 `.env` 已存在，但你想重新生成：
+
+```bash
+npm run init-env -- --force
+```
+
+如果你只是想单独生成或重建 `.env`，仍然可以直接执行 `npm run setup`。
+
 可选环境变量：
 
 ```bash

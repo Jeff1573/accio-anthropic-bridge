@@ -5,7 +5,9 @@
   "description": "Anthropic-compatible proxy that bridges requests into Accio's local gateway",
   "main": "src/server.js",
   "scripts": {
-    "start": "node src/server.js"
+    "init-env": "node scripts/init-env.js",
+    "setup": "node scripts/init-env.js",
+    "start": "node src/start.js"
   },
   "engines": {
     "node": ">=22"

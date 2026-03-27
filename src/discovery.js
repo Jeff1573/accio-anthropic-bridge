@@ -54,6 +54,154 @@ function statMtimeMs(filePath) {
   }
 }
 
+function parseTimestamp(value) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string" && value) {
+    const normalized = value.includes("T") ? value : value.replace(" ", "T");
+    const parsed = Date.parse(normalized);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return 0;
+}
+
+function parseSessionKey(sessionKey) {
+  if (!sessionKey || typeof sessionKey !== "string") {
+    return null;
+  }
+
+  const marker = ":cid:";
+  const markerIndex = sessionKey.lastIndexOf(marker);
+
+  if (markerIndex <= 0) {
+    return null;
+  }
+
+  const prefix = sessionKey.slice(0, markerIndex);
+  const conversationId = sessionKey.slice(markerIndex + marker.length) || null;
+  const parts = prefix.split(":");
+
+  if (parts.length < 5 || parts[0] !== "agent") {
+    return null;
+  }
+
+  return {
+    agentId: parts[1] || null,
+    channelId: parts[2] || null,
+    chatType: parts[3] || null,
+    chatId: parts.slice(4).join(":") || null,
+    conversationId
+  };
+}
+
+function discoverSessionCandidates(accountDir, preferredAgentId) {
+  const agentsRoot = path.join(accountDir, "agents");
+  const discoveredAgentIds = listDirectories(agentsRoot).filter((name) =>
+    name.startsWith("DID-")
+  );
+  const ordered = preferredAgentId
+    ? [preferredAgentId, ...discoveredAgentIds.filter((id) => id !== preferredAgentId)]
+    : discoveredAgentIds;
+  const candidates = [];
+
+  for (const agentId of ordered) {
+    const sessionsDir = path.join(agentsRoot, agentId, "sessions");
+    let files = [];
+
+    try {
+      files = fs.readdirSync(sessionsDir).filter((name) => name.endsWith(".meta.jsonc"));
+    } catch {
+      continue;
+    }
+
+    for (const fileName of files) {
+      const filePath = path.join(sessionsDir, fileName);
+      const meta = readJsonIfExists(filePath, { jsonc: true });
+      const parsed = parseSessionKey(meta && meta.sessionId);
+
+      if (!parsed || !parsed.channelId || !parsed.chatId) {
+        continue;
+      }
+
+      candidates.push({
+        ...parsed,
+        agentId: parsed.agentId || agentId,
+        updatedAt: Math.max(
+          parseTimestamp(meta && meta.updatedAt),
+          parseTimestamp(meta && meta.lastUserMessageAt),
+          statMtimeMs(filePath)
+        )
+      });
+    }
+  }
+
+  return candidates.sort((left, right) => right.updatedAt - left.updatedAt);
+}
+
+function discoverConversationActivity(accountDir) {
+  const sessionIndex = readJsonIfExists(path.join(accountDir, "conversations", "dm", "session_1.json"));
+
+  if (!Array.isArray(sessionIndex)) {
+    return 0;
+  }
+
+  let latest = 0;
+
+  for (const item of sessionIndex) {
+    latest = Math.max(
+      latest,
+      parseTimestamp(item && item.updatedAt),
+      parseTimestamp(item && item.createdAt),
+      parseTimestamp(item && item.ts)
+    );
+  }
+
+  return latest;
+}
+
+function collectAccountSignals(accountDir) {
+  const sessionCandidates = discoverSessionCandidates(accountDir, null);
+  const latestSessionActivity = sessionCandidates[0] ? sessionCandidates[0].updatedAt : 0;
+  const latestConversationActivity = discoverConversationActivity(accountDir);
+  const channelsRoot = path.join(accountDir, "channels");
+  const channelIds = listDirectories(channelsRoot);
+  let latestChannelActivity = 0;
+  let hasConversationSource = false;
+
+  for (const channelId of channelIds) {
+    const dmPath = path.join(channelsRoot, channelId, "dm.json");
+    const dm = readJsonIfExists(dmPath);
+
+    if (dm && Array.isArray(dm.conversations) && dm.conversations.length > 0) {
+      hasConversationSource = true;
+
+      for (const conversation of dm.conversations) {
+        latestChannelActivity = Math.max(
+          latestChannelActivity,
+          parseTimestamp(conversation && conversation.updatedAt),
+          parseTimestamp(conversation && conversation.createdAt)
+        );
+      }
+    }
+
+    latestChannelActivity = Math.max(latestChannelActivity, statMtimeMs(dmPath));
+  }
+
+  return {
+    latestActivity: Math.max(
+      latestSessionActivity,
+      latestConversationActivity,
+      latestChannelActivity,
+      statMtimeMs(accountDir)
+    ),
+    hasConversationSource,
+    hasSessionSource: sessionCandidates.length > 0
+  };
+}
+
 function resolveAccioHome(preferredHome) {
   return preferredHome || process.env.ACCIO_HOME || path.join(os.homedir(), ".accio");
 }
@@ -68,26 +216,25 @@ function discoverAccountId(accioHome, preferredAccountId) {
   const ranked = accountIds
     .map((accountId) => {
       const accountDir = path.join(accountsRoot, accountId);
-      const channelsRoot = path.join(accountDir, "channels");
-      const channelIds = listDirectories(channelsRoot);
-      let hasConversationSource = false;
-
-      for (const channelId of channelIds) {
-        const dm = readJsonIfExists(path.join(channelsRoot, channelId, "dm.json"));
-
-        if (dm && Array.isArray(dm.conversations) && dm.conversations.length > 0) {
-          hasConversationSource = true;
-          break;
-        }
-      }
+      const signals = collectAccountSignals(accountDir);
 
       return {
         accountId,
-        hasConversationSource,
+        hasConversationSource: signals.hasConversationSource,
+        hasSessionSource: signals.hasSessionSource,
+        latestActivity: signals.latestActivity,
         mtimeMs: statMtimeMs(accountDir)
       };
     })
     .sort((left, right) => {
+      if (left.latestActivity !== right.latestActivity) {
+        return right.latestActivity - left.latestActivity;
+      }
+
+      if (left.hasSessionSource !== right.hasSessionSource) {
+        return Number(right.hasSessionSource) - Number(left.hasSessionSource);
+      }
+
       if (left.hasConversationSource !== right.hasConversationSource) {
         return Number(right.hasConversationSource) - Number(left.hasConversationSource);
       }
@@ -145,6 +292,20 @@ function discoverChannelInfo(accountDir, preferredChannelId) {
       conversationId: conversation ? conversation.conversationId : null,
       title: info.title || info.displayName || null,
       userId: info.userId || info.username || (conversation && conversation.chatId) || null
+    };
+  }
+
+  const latestSession = discoverSessionCandidates(accountDir, null)[0] || null;
+
+  if (latestSession) {
+    return {
+      agentId: latestSession.agentId || null,
+      channelId: latestSession.channelId || preferredChannelId || "weixin",
+      chatId: latestSession.chatId || null,
+      chatType: latestSession.chatType || "private",
+      conversationId: latestSession.conversationId || null,
+      title: null,
+      userId: latestSession.chatId || null
     };
   }
 
