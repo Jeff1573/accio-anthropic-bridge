@@ -1,0 +1,14 @@
+{
+  "name": "accio-bridge-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Electron shell for the Accio Anthropic bridge admin console",
+  "main": "main.js",
+  "scripts": {
+    "start": "node start.js",
+    "check": "node --check main.js && node --check start.js"
+  },
+  "devDependencies": {
+    "electron": "41.1.0"
+  }
+}

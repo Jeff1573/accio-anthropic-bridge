@@ -467,6 +467,25 @@ npm run manager:open
 - 发起网页登录 / 执行登出
 - 把当前 token 写回账号池文件
 
+桌面壳（Electron）：
+
+```bash
+npm run desktop:install
+npm run desktop:start
+```
+
+桌面壳会做三件事：
+
+- 先检查本地 bridge 是否已经在 `http://127.0.0.1:<PORT>` 监听；如果没起来，就从当前仓库目录自动执行 `node src/start.js`
+- 把已有的管理台 `/admin` 直接嵌进桌面窗口，不重复实现一套独立管理逻辑
+- 只在“桌面壳自己拉起了 bridge”时，退出桌面壳时一并结束那个子进程；如果 bridge 本来就是你手动启动的，它不会额外干预
+
+说明：
+
+- 当前是本地桌面壳，不是已打包的 `.app` / `.exe` 发布物
+- 第一次使用前需要先执行一次 `npm run desktop:install` 安装 Electron
+- bridge 的实际端口仍然以你的 `.env` 里的 `PORT` 为准，桌面壳会读取同一个 `.env`
+
 ## 本地鉴权探测
 
 桥接自身新增了一个探测端点，用来快速判断当前机器上的 Accio 本地鉴权能否复用：
