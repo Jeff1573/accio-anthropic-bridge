@@ -1,15 +1,17 @@
 "use strict";
 
+const http = require("node:http");
 const path = require("node:path");
 const { spawn, execFile } = require("node:child_process");
 const { promisify } = require("node:util");
-const { app, BrowserWindow, Menu, dialog, shell, clipboard } = require("electron");
+const { app, BrowserWindow, Menu, dialog, shell, clipboard, ipcMain, safeStorage } = require("electron");
 
 const { loadEnvFile } = require("../src/env-file");
 const { createConfig } = require("../src/runtime-config");
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(__dirname, "..");
+const PRELOAD_PATH = path.join(__dirname, "preload.js");
 const ENV_PATH = path.join(REPO_ROOT, ".env");
 
 loadEnvFile(ENV_PATH);
@@ -23,14 +25,171 @@ const HEALTH_URL = `${BRIDGE_BASE_URL}/healthz`;
 const START_TIMEOUT_MS = 30000;
 const BRIDGE_NODE_PATH = process.env.ACCIO_DESKTOP_NODE_PATH || process.env.NODE || "node";
 const START_POLL_MS = 500;
+const DESKTOP_HELPER_PORT = Number(process.env.ACCIO_DESKTOP_HELPER_PORT || bridgeConfig.desktopHelperUrl?.match(/:(\d+)(?:\/|$)/)?.[1] || 8090);
+
+let desktopCommandServer = null;
 
 let mainWindow = null;
 let bridgeProcess = null;
 let bridgeOwned = false;
 let quitting = false;
 
+async function launchAccioDesktopApp() {
+  process.stdout.write('[desktop] launch Accio requested\n');
+  const appPath = String(bridgeConfig.appPath || '/Applications/Accio.app');
+  const attempts = [];
+
+  if (process.platform === 'darwin') {
+    try {
+      await execFileAsync('open', ['-a', appPath]);
+      return { ok: true, method: 'open -a', appPath };
+    } catch (error) {
+      attempts.push(error instanceof Error ? error.message : String(error));
+    }
+
+    try {
+      await execFileAsync('open', [appPath]);
+      return { ok: true, method: 'open path', appPath };
+    } catch (error) {
+      attempts.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  try {
+    const shellResult = await shell.openPath(appPath);
+    if (!shellResult) {
+      return { ok: true, method: 'shell.openPath', appPath };
+    }
+    attempts.push(shellResult);
+  } catch (error) {
+    attempts.push(error instanceof Error ? error.message : String(error));
+  }
+
+  throw new Error(`Failed to launch Accio desktop app: ${attempts.filter(Boolean).join(' | ') || 'unknown error'}`);
+}
+
+ipcMain.handle('bridge:launch-accio', async (_event, params = {}) => {
+  const result = await launchAccioDesktopApp();
+  if (params && params.reload && mainWindow && !mainWindow.isDestroyed()) {
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.reloadIgnoringCache();
+      }
+    }, 1000);
+  }
+  process.stdout.write(`[desktop] launch Accio finished via IPC: ${JSON.stringify(result)}\n`);
+  return result;
+});
+
+async function handleDesktopBridgeCommand(targetUrl) {
+  const parsed = new URL(targetUrl);
+  const command = parsed.hostname || parsed.pathname.replace(/^\//, '');
+
+  if (command === 'launch-accio') {
+    await launchAccioDesktopApp();
+
+    const shouldReload = parsed.searchParams.get('reload') === '1';
+    if (shouldReload && mainWindow && !mainWindow.isDestroyed()) {
+      setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.reloadIgnoringCache();
+        }
+      }, 1000);
+    }
+
+    return true;
+  }
+
+  return false;
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function writeJson(res, statusCode, payload) {
+  res.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store"
+  });
+  res.end(JSON.stringify(payload));
+}
+
+function sanitizeCredentialPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, error: "invalid_payload" };
+  }
+
+  return {
+    ok: true,
+    user: payload.user || null,
+    accessTokenPreview: payload.accessToken ? String(payload.accessToken).slice(0, 12) + '***' : null,
+    refreshTokenPreview: payload.refreshToken ? String(payload.refreshToken).slice(0, 12) + '***' : null,
+    expiresAt: payload.expiresAt || null,
+    hasCookie: Boolean(payload.cookie),
+    cookiePreview: payload.cookie ? String(payload.cookie).slice(0, 64) + '***' : null,
+    keys: Object.keys(payload).sort()
+  };
+}
+
+function decryptCredentialFile(filePath) {
+  const raw = require("node:fs").readFileSync(filePath);
+  const decrypted = safeStorage.decryptString(raw);
+  return sanitizeCredentialPayload(JSON.parse(decrypted));
+}
+
+function startDesktopCommandServer() {
+  if (desktopCommandServer) {
+    return desktopCommandServer;
+  }
+
+  desktopCommandServer = http.createServer(async (req, res) => {
+    try {
+      if (req.method === "GET" && req.url === "/healthz") {
+        writeJson(res, 200, { ok: true, port: DESKTOP_HELPER_PORT });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/launch-accio") {
+        const result = await launchAccioDesktopApp();
+        process.stdout.write(`[desktop] launch Accio finished via helper: ${JSON.stringify(result)}
+`);
+        writeJson(res, 200, { ok: true, result });
+        return;
+      }
+
+      if (req.method === "POST" && req.url === "/debug/decrypt-credentials") {
+        const chunks = [];
+        for await (const chunk of req) {
+          chunks.push(chunk);
+        }
+        const body = chunks.length > 0 ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+        const filePath = body && body.path ? String(body.path) : "";
+        if (!filePath) {
+          writeJson(res, 400, { ok: false, error: "path is required" });
+          return;
+        }
+        writeJson(res, 200, decryptCredentialFile(filePath));
+        return;
+      }
+
+      writeJson(res, 404, { ok: false, error: "not_found" });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`[desktop] helper request failed: ${message}\n`);
+      writeJson(res, 500, { ok: false, error: message });
+    }
+  });
+
+  desktopCommandServer.on("error", (error) => {
+    process.stderr.write(`[desktop] helper server error: ${error instanceof Error ? error.stack : String(error)}\n`);
+  });
+
+  desktopCommandServer.listen(DESKTOP_HELPER_PORT, "127.0.0.1", () => {
+    process.stdout.write(`[desktop] helper listening on http://127.0.0.1:${DESKTOP_HELPER_PORT}\n`);
+  });
+
+  return desktopCommandServer;
 }
 
 function encodeHtml(value) {
@@ -42,8 +201,11 @@ function encodeHtml(value) {
 }
 
 function buildShellHtml(title, body, tone) {
-  const accent = tone === "error" ? "#a33131" : "#b04f31";
-  const shadow = tone === "error" ? "rgba(163,49,49,0.18)" : "rgba(176,79,49,0.18)";
+  const isError = tone === "error";
+  const accent = isError ? "#c43c3c" : "#c25a32";
+  const accentSoft = isError ? "rgba(196,60,60,0.1)" : "rgba(194,90,50,0.1)";
+  const icon = isError ? "\u26A0\uFE0F" : "\u2728";
+  const loadingHtml = isError ? "" : `<div class="loading-dots"><span></span><span></span><span></span></div>`;
 
   return `<!doctype html>
 <html lang="zh-CN">
@@ -52,58 +214,100 @@ function buildShellHtml(title, body, tone) {
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>${encodeHtml(title)}</title>
 <style>
-:root {
-  color-scheme: light;
-  --bg: #f4efe8;
-  --panel: rgba(255,255,255,0.82);
-  --ink: #171514;
-  --muted: #6f6259;
-  --line: rgba(23,21,20,0.08);
-  --accent: ${accent};
-  --shadow: ${shadow};
+@keyframes fadeSlideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
 }
-* { box-sizing: border-box; }
-html, body { margin: 0; min-height: 100%; background:
-  radial-gradient(circle at top left, rgba(176,79,49,0.14), transparent 34%),
-  radial-gradient(circle at bottom right, rgba(23,21,20,0.08), transparent 28%),
-  var(--bg); color: var(--ink); font-family: "SF Pro Display", "PingFang SC", "Hiragino Sans GB", sans-serif; }
+@keyframes bounce {
+  0%, 80%, 100% { transform: scale(0); }
+  40% { transform: scale(1); }
+}
+@keyframes gradientShift {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+* { box-sizing: border-box; margin: 0; }
+html, body {
+  margin: 0; min-height: 100%;
+  background: linear-gradient(175deg, #faf8f5 0%, #f2ede6 50%, #ede7df 100%);
+  background-size: 200% 200%;
+  animation: gradientShift 8s ease infinite;
+  color: #1a1816;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
 body { display: grid; place-items: center; padding: 28px; }
 main {
-  width: min(760px, 100%);
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 28px;
-  box-shadow: 0 28px 80px var(--shadow);
+  width: min(600px, 100%);
+  background: rgba(255,254,252,0.92);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(24,22,20,0.08);
+  border-radius: 22px;
+  box-shadow: 0 16px 48px rgba(56,40,28,0.1);
   overflow: hidden;
+  animation: fadeSlideUp 0.5s ease-out;
 }
-header { padding: 28px 30px 0; }
-header small { display: block; color: var(--accent); letter-spacing: 0.14em; text-transform: uppercase; font-size: 12px; }
-h1 { margin: 12px 0 0; font-size: clamp(28px, 4vw, 44px); line-height: 1.04; letter-spacing: -0.05em; }
-section { padding: 22px 30px 30px; }
-p { margin: 0; color: var(--muted); font-size: 15px; line-height: 1.72; }
+header { padding: 24px 26px 0; }
+.icon { font-size: 32px; margin-bottom: 10px; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: ${accentSoft};
+  color: ${accent};
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-size: 11px;
+  font-weight: 600;
+}
+h1 { margin: 12px 0 0; font-size: clamp(22px, 3vw, 30px); font-weight: 700; line-height: 1.15; letter-spacing: -0.03em; }
+section { padding: 16px 26px 26px; }
+p { margin: 0; color: #8a8279; font-size: 13px; line-height: 1.7; }
 .code {
-  margin-top: 18px;
-  padding: 16px 18px;
-  border-radius: 18px;
-  background: rgba(23,21,20,0.05);
-  border: 1px solid var(--line);
+  margin-top: 16px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(24,22,20,0.04);
+  border: 1px solid rgba(24,22,20,0.08);
   white-space: pre-wrap;
   word-break: break-word;
   font-family: "SFMono-Regular", ui-monospace, monospace;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.6;
+  color: #4a443e;
 }
+.loading-dots {
+  display: flex;
+  gap: 6px;
+  margin-top: 18px;
+  justify-content: center;
+}
+.loading-dots span {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: ${accent};
+  animation: bounce 1.4s ease-in-out infinite both;
+}
+.loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+.loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+.loading-dots span:nth-child(3) { animation-delay: 0s; }
 </style>
 </head>
 <body>
 <main>
   <header>
-    <small>Accio Bridge Desktop</small>
+    <div class="icon">${icon}</div>
+    <div class="badge">Accio Bridge Desktop</div>
     <h1>${encodeHtml(title)}</h1>
   </header>
   <section>
     <p>${encodeHtml(body)}</p>
     <div class="code">Bridge: ${encodeHtml(BRIDGE_BASE_URL)}\nAdmin: ${encodeHtml(ADMIN_URL)}</div>
+    ${loadingHtml}
   </section>
 </main>
 </body>
@@ -174,7 +378,7 @@ function startBridgeProcess() {
     if (!quitting && mainWindow && !mainWindow.isDestroyed()) {
       const html = buildShellHtml(
         "Bridge 已退出",
-        "桌面壳检测到本地 bridge 进程提前结束。可以从菜单重新打开，或先在终端里运行 npm start 查看具体报错。",
+        "桌面壳检测到 bridge 提前退出。通常是端口占用或本地配置异常，先确认 8082 没被旧进程占用，再重新打开管理台。",
         "error"
       );
       mainWindow.loadURL(toDataUrl(html)).catch(() => {});
@@ -227,9 +431,37 @@ function createMainWindow() {
     title: "Accio Bridge Desktop",
     autoHideMenuBar: false,
     webPreferences: {
+      preload: PRELOAD_PATH,
       contextIsolation: true,
-      sandbox: true,
+      sandbox: false,
       spellcheck: false
+    }
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (String(url).startsWith('accio-bridge://')) {
+      handleDesktopBridgeCommand(url).catch((error) => {
+        dialog.showErrorBox('Accio 操作失败', error instanceof Error ? error.message : String(error));
+      });
+      return { action: "deny" };
+    }
+
+    shell.openExternal(url).catch(() => {});
+    return { action: "deny" };
+  });
+
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (String(url).startsWith('accio-bridge://')) {
+      event.preventDefault();
+      handleDesktopBridgeCommand(url).catch((error) => {
+        dialog.showErrorBox('Accio 操作失败', error instanceof Error ? error.message : String(error));
+      });
+      return;
+    }
+
+    if (!url.startsWith(BRIDGE_BASE_URL)) {
+      event.preventDefault();
+      shell.openExternal(url).catch(() => {});
     }
   });
 
@@ -362,6 +594,7 @@ function buildMenuTemplate() {
 }
 
 async function boot() {
+  startDesktopCommandServer();
   createMainWindow();
   Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate()));
   await loadInitialShell();
@@ -394,6 +627,10 @@ app.on("activate", async () => {
 
 app.on("before-quit", () => {
   quitting = true;
+  if (desktopCommandServer) {
+    desktopCommandServer.close();
+    desktopCommandServer = null;
+  }
 });
 
 app.whenReady()
