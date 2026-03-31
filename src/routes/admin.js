@@ -8,6 +8,7 @@ const { promisify } = require("node:util");
 
 const { readJsonBody } = require("../middleware/body-parser");
 const { writeJson, CORS_HEADERS } = require("../http");
+const { fetchAccountsOverview, fetchAccountsQuota } = require("../account-quota");
 const {
   detectActiveStorage,
   readGatewayState,
@@ -1809,6 +1810,20 @@ async function handleAdminState(req, res, config, authProvider) {
   writeJson(res, 200, await buildAdminState(config, authProvider));
 }
 
+/**
+ * Handles the account quota probe endpoint for all configured file accounts.
+ *
+ * @param {import("node:http").IncomingMessage} req Incoming HTTP request.
+ * @param {import("node:http").ServerResponse} res Outgoing HTTP response.
+ * @param {object} config Runtime configuration object.
+ * @param {object} [options] Optional test hooks forwarded to the quota fetcher.
+ * @returns {Promise<void>} Resolves after the JSON response has been written.
+ */
+async function handleAdminAccountsQuota(req, res, config, options = {}) {
+  const payload = await fetchAccountsQuota(config, options);
+  writeJson(res, 200, payload);
+}
+
 async function handleAdminSnapshotCreate(req, res, config) {
   const body = await readJsonBody(req, req.bridgeContext && req.bridgeContext.bodyParser ? req.bridgeContext.bodyParser : {});
   const gateway = await readGatewayState(config.baseUrl);
@@ -2320,6 +2335,7 @@ async function handleAdminAccountLoginStatus(req, res, config, url) {
 module.exports = {
   handleAdminPage,
   handleAdminState,
+  handleAdminAccountsQuota,
   handleAdminSnapshotCreate,
   handleAdminSnapshotActivate,
   handleAdminSnapshotDelete,
