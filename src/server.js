@@ -18,6 +18,7 @@ const { handleTraceDetail, handleTraceReplay, handleTracesList } = require("./ro
 const {
   handleAdminPage,
   handleAdminState,
+  handleAdminAccountsOverview,
   handleAdminAccountsQuota,
   handleAdminSnapshotCreate,
   handleAdminSnapshotActivate,
@@ -116,6 +117,7 @@ function createServer(config, client, directClient, authProvider, gatewayManager
           endpoints: [
             "GET /admin",
             "GET /admin/api/state",
+            "GET /admin/api/accounts/overview",
             "GET /admin/api/accounts/quota",
             "POST /admin/api/snapshots",
             "POST /admin/api/snapshots/activate",
@@ -150,6 +152,12 @@ function createServer(config, client, directClient, authProvider, gatewayManager
 
       if (req.method === "GET" && url.pathname === "/admin/api/state") {
         await handleAdminState(req, res, config, authProvider);
+        finishLog("info", "request completed", { status: res.statusCode || 200, protocol: "admin-api" });
+        return;
+      }
+
+      if (req.method === "GET" && url.pathname === "/admin/api/accounts/overview") {
+        await handleAdminAccountsOverview(req, res, config);
         finishLog("info", "request completed", { status: res.statusCode || 200, protocol: "admin-api" });
         return;
       }

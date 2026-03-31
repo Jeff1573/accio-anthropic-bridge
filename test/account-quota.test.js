@@ -7,12 +7,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  fetchAccountsOverview,
   fetchAccountsQuota,
+  formatAccessTokenPreview,
   formatQuotaCountdownText,
   formatQuotaRefreshTimeText,
   clearAccountQuotaCache
 } = require("../src/account-quota");
-const { handleAdminAccountsQuota } = require("../src/routes/admin");
+const { handleAdminAccountsOverview, handleAdminAccountsQuota, handleAdminPage } = require("../src/routes/admin");
 
 /**
  * Creates a temporary runtime config backed by a generated accounts.json file.
@@ -97,6 +99,12 @@ test("formatQuotaCountdownText handles seconds, hours, and days", () => {
 
 test("formatQuotaRefreshTimeText returns local fixed-width time", () => {
   assert.equal(formatQuotaRefreshTimeText(new Date(2026, 2, 31, 10, 0, 0).getTime()), "2026-03-31 10:00:00");
+});
+
+test("formatAccessTokenPreview compresses long tokens and preserves short ones", () => {
+  assert.equal(formatAccessTokenPreview("short_token"), "short_token");
+  assert.equal(formatAccessTokenPreview("s12345678901234567890abcdef"), "s123456789...90abcdef");
+  assert.equal(formatAccessTokenPreview(""), null);
 });
 
 test("fetchAccountsQuota parses upstream payload and returns live quota data", async () => {
@@ -354,6 +362,70 @@ test("fetchAccountsQuota allows empty x-cna when cookie has no cna", async () =>
   }
 });
 
+test("fetchAccountsOverview merges file accounts with quota-derived fields", async () => {
+  const { config, cleanup } = createTempQuotaConfig({
+    accounts: [
+      {
+        id: "acct_ok",
+        name: "正常账号",
+        accessToken: "token_overview_abcdefghijklmnopqrstuvwxyz",
+        enabled: true,
+        expiresAt: new Date(2026, 3, 1, 8, 30, 0).getTime(),
+        source: "gateway-capture"
+      },
+      {
+        id: "acct_disabled",
+        name: "禁用账号",
+        accessToken: "token_disabled",
+        enabled: false,
+        source: "manual"
+      },
+      {
+        id: "acct_missing",
+        name: "缺 token",
+        enabled: true
+      }
+    ]
+  });
+
+  try {
+    const payload = await fetchAccountsOverview(config, {
+      fetchImpl: async (url) => {
+        if (String(url).includes("token_overview_abcdefghijklmnopqrstuvwxyz")) {
+          return createJsonResponse({
+            success: true,
+            data: {
+              usagePercent: 22,
+              refreshCountdownSeconds: 180
+            }
+          });
+        }
+
+        return createJsonResponse({ success: false, data: {} });
+      }
+    });
+
+    assert.equal(payload.ok, true);
+    assert.equal(payload.quotaCacheTtlMs, 30000);
+    assert.equal(payload.accounts.length, 3);
+    assert.equal(payload.accounts[0].status, "ok");
+    assert.equal(payload.accounts[0].source, "gateway-capture");
+    assert.equal(payload.accounts[0].quotaSource, "live");
+    assert.equal(payload.accounts[0].usagePercentText, "22.00%");
+    assert.equal(payload.accounts[0].availablePercent, 78);
+    assert.equal(payload.accounts[0].availablePercentText, "78.00%");
+    assert.equal(payload.accounts[0].accessToken, "token_overview_abcdefghijklmnopqrstuvwxyz");
+    assert.equal(payload.accounts[0].accessTokenPreview, "token_over...stuvwxyz");
+    assert.equal(payload.accounts[0].expiresAtText, "2026-04-01 08:30:00");
+    assert.equal(payload.accounts[1].status, "skipped");
+    assert.equal(payload.accounts[1].error.type, "disabled");
+    assert.equal(payload.accounts[2].status, "skipped");
+    assert.equal(payload.accounts[2].error.type, "missing_access_token");
+  } finally {
+    cleanup();
+  }
+});
+
 test("handleAdminAccountsQuota writes a 200 JSON response", async () => {
   const { config, cleanup } = createTempQuotaConfig({
     accounts: [
@@ -381,6 +453,59 @@ test("handleAdminAccountsQuota writes a 200 JSON response", async () => {
     assert.equal(res.statusCode, 200);
     assert.equal(body.ok, true);
     assert.equal(body.accounts[0].usagePercent, 3.21);
+  } finally {
+    cleanup();
+  }
+});
+
+test("handleAdminAccountsOverview writes aggregated card data", async () => {
+  const { config, cleanup } = createTempQuotaConfig({
+    accounts: [
+      {
+        id: "acct_primary",
+        name: "主账号",
+        accessToken: "token_overview_handler"
+      }
+    ]
+  });
+  const res = createResponseRecorder();
+
+  try {
+    await handleAdminAccountsOverview({}, res, config, {
+      fetchImpl: async () => createJsonResponse({
+        success: true,
+        data: {
+          usagePercent: 15,
+          refreshCountdownSeconds: 45
+        }
+      })
+    });
+
+    const body = JSON.parse(res.body);
+    assert.equal(res.statusCode, 200);
+    assert.equal(body.ok, true);
+    assert.equal(body.accounts[0].availablePercent, 85);
+    assert.equal(body.accounts[0].accessToken, "token_overview_handler");
+  } finally {
+    cleanup();
+  }
+});
+
+test("handleAdminPage returns the replacement read-only board HTML", async () => {
+  const { config, cleanup } = createTempQuotaConfig({ accounts: [] });
+  const res = createResponseRecorder();
+
+  try {
+    await handleAdminPage({}, res, config);
+
+    assert.equal(res.statusCode, 200);
+    assert.match(res.body, /账号信息看板/);
+    assert.match(res.body, /\/admin\/api\/accounts\/overview/);
+    assert.match(res.body, /复制 Token/);
+    assert.doesNotMatch(res.body, /添加账号登录/);
+    assert.doesNotMatch(res.body, /保存当前账号/);
+    assert.doesNotMatch(res.body, /data-activate-snapshot/);
+    assert.doesNotMatch(res.body, /\/admin\/api\/state/);
   } finally {
     cleanup();
   }

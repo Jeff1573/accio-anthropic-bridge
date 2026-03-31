@@ -1801,9 +1801,555 @@ refreshState().catch((error) => setMessage('error', error.message || String(erro
 </html>`;
 }
 
+/**
+ * Renders the replacement `/admin` page as a read-only account board.
+ *
+ * @param {object} config Runtime configuration object.
+ * @returns {string} HTML document string.
+ */
+function renderAdminAccountsPage(config) {
+  const title = escapeHtml(`Accio 账号看板 · ${config.port}`);
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${title}</title>
+<style>
+:root {
+  --bg: #f3efe7;
+  --panel: rgba(255,255,252,0.88);
+  --panel-strong: #fffdfa;
+  --ink: #181511;
+  --muted: #756d63;
+  --line: rgba(24,21,17,0.09);
+  --line-strong: rgba(24,21,17,0.18);
+  --accent: #9f492c;
+  --accent-soft: rgba(159,73,44,0.1);
+  --good: #1d7d55;
+  --good-soft: rgba(29,125,85,0.11);
+  --warn: #a76b12;
+  --warn-soft: rgba(167,107,18,0.12);
+  --bad: #b33838;
+  --bad-soft: rgba(179,56,56,0.12);
+  --shadow: 0 18px 50px rgba(53,38,25,0.08);
+  --radius-lg: 26px;
+  --radius-md: 18px;
+  --radius-sm: 12px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; min-height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "PingFang SC", "Noto Sans SC", sans-serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(159,73,44,0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(29,125,85,0.09), transparent 20%),
+    linear-gradient(180deg, #fbf8f2 0%, #f3efe7 45%, #ece6db 100%);
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; }
+.shell {
+  width: min(1240px, calc(100vw - 28px));
+  margin: 0 auto;
+  padding: 28px 0 36px;
+}
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: end;
+  margin-bottom: 18px;
+}
+.heroMain {
+  background: linear-gradient(135deg, rgba(255,253,250,0.94), rgba(247,240,232,0.84));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 22px 24px;
+}
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.hero h1 {
+  margin: 14px 0 10px;
+  font-size: clamp(28px, 4vw, 44px);
+  line-height: 1.02;
+  letter-spacing: -0.04em;
+}
+.hero p {
+  margin: 0;
+  max-width: 58ch;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.7;
+}
+.toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 260px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+.toolbarLabel {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.toolbarStrong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.toolbarMeta {
+  color: var(--muted);
+  font-size: 13px;
+}
+.btn {
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.82);
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: transform .15s ease, border-color .15s ease, background .15s ease;
+}
+.btn:hover {
+  transform: translateY(-1px);
+  background: #fff;
+  border-color: var(--line-strong);
+}
+.btn:disabled {
+  cursor: wait;
+  opacity: .7;
+  transform: none;
+}
+.boardMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.boardMetaText {
+  color: var(--muted);
+  font-size: 13px;
+}
+.notice {
+  display: none;
+  margin-bottom: 14px;
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.74);
+  color: var(--ink);
+  font-size: 13px;
+}
+.notice.show { display: block; }
+.notice.ok { background: var(--good-soft); color: #175840; border-color: rgba(29,125,85,0.16); }
+.notice.error { background: var(--bad-soft); color: #7f2323; border-color: rgba(179,56,56,0.18); }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 16px;
+}
+.card {
+  display: grid;
+  gap: 14px;
+  background: linear-gradient(180deg, rgba(255,253,250,0.96), rgba(249,244,237,0.9));
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+.cardHeader {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.cardTitle {
+  display: grid;
+  gap: 4px;
+}
+.cardTitle h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  word-break: break-word;
+}
+.cardSub {
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-word;
+}
+.stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  background: rgba(24,21,17,0.06);
+  color: var(--muted);
+}
+.pill.good { background: var(--good-soft); color: var(--good); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.metric {
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.68);
+  border: 1px solid var(--line);
+}
+.metricLabel {
+  color: var(--muted);
+  font-size: 12px;
+}
+.metricValue {
+  margin-top: 6px;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+.metaList {
+  display: grid;
+  gap: 8px;
+}
+.metaRow {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 8px;
+  font-size: 13px;
+}
+.metaLabel {
+  color: var(--muted);
+}
+.metaValue {
+  color: var(--ink);
+  word-break: break-word;
+}
+.tokenBox {
+  padding: 14px;
+  border-radius: var(--radius-sm);
+  background: #171412;
+  color: #f8f5ee;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.tokenTop {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.tokenHint {
+  color: rgba(248,245,238,0.68);
+  font-size: 12px;
+}
+.copyBtn {
+  border: none;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #c56a48, #9f492c);
+  color: #fff;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+.copyBtn:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+.tokenValue {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.tokenPreview {
+  color: rgba(248,245,238,0.74);
+  font-size: 11px;
+  margin-top: 10px;
+}
+.errorBox {
+  padding: 11px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bad-soft);
+  border: 1px solid rgba(179,56,56,0.14);
+  color: #7f2323;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.empty {
+  padding: 24px;
+  text-align: center;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  background: rgba(255,255,255,0.56);
+}
+@media (max-width: 860px) {
+  .hero {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+</head>
+<body>
+<div class="shell">
+  <section class="hero">
+    <div class="heroMain">
+      <div class="eyebrow">Accio Board</div>
+      <h1>账号信息看板</h1>
+      <p>这里只显示本地账号信息和积分状态，不再提供授权登录、快照切换或任何写操作。每个账号一张卡片，支持直接复制 accessToken。</p>
+    </div>
+    <aside class="toolbar">
+      <div class="toolbarLabel">数据状态</div>
+      <div class="toolbarStrong" id="summary-text">正在加载账号信息...</div>
+      <div class="toolbarMeta" id="summary-meta">请稍候</div>
+      <button class="btn" id="refresh-btn">刷新数据</button>
+    </aside>
+  </section>
+
+  <div class="boardMeta">
+    <div class="boardMetaText" id="board-meta-text">等待数据...</div>
+  </div>
+
+  <div class="notice" id="page-notice"></div>
+  <section class="grid" id="account-grid"></section>
+</div>
+<script>
+const els = {
+  summaryText: document.getElementById('summary-text'),
+  summaryMeta: document.getElementById('summary-meta'),
+  boardMetaText: document.getElementById('board-meta-text'),
+  refreshBtn: document.getElementById('refresh-btn'),
+  pageNotice: document.getElementById('page-notice'),
+  accountGrid: document.getElementById('account-grid')
+};
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function setNotice(type, text) {
+  if (!text) {
+    els.pageNotice.className = 'notice';
+    els.pageNotice.textContent = '';
+    return;
+  }
+
+  els.pageNotice.className = 'notice show ' + type;
+  els.pageNotice.textContent = text;
+}
+
+function metricValue(value, fallback) {
+  return value == null || value === '' ? (fallback || '—') : String(value);
+}
+
+function createMetaRow(label, value) {
+  return '<div class="metaRow"><div class="metaLabel">' + escapeHtml(label) + '</div><div class="metaValue">' + escapeHtml(value || '—') + '</div></div>';
+}
+
+function createStatusPill(account) {
+  if (account.status === 'ok') {
+    return '<span class="pill good">可用</span>';
+  }
+
+  if (account.status === 'skipped') {
+    return '<span class="pill warn">已跳过</span>';
+  }
+
+  return '<span class="pill bad">异常</span>';
+}
+
+function renderCards(accounts) {
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    els.accountGrid.innerHTML = '<div class="empty">当前没有可展示的账号。</div>';
+    return;
+  }
+
+  els.accountGrid.innerHTML = accounts.map((account) => {
+    const enabledPill = account.enabled ? '<span class="pill good">启用</span>' : '<span class="pill warn">禁用</span>';
+    const tokenDisabled = !account.accessToken ? ' disabled' : '';
+    const errorBlock = account.error
+      ? '<div class="errorBox">' + escapeHtml(account.error.message || '未知错误') + '</div>'
+      : '';
+
+    return '<article class="card">'
+      + '<div class="cardHeader">'
+      + '<div class="cardTitle">'
+      + '<h2>' + escapeHtml(account.name || account.id || '未命名账号') + '</h2>'
+      + '<div class="cardSub">' + escapeHtml(account.id || '—') + '</div>'
+      + '</div>'
+      + '<div class="stack">' + createStatusPill(account) + enabledPill + '</div>'
+      + '</div>'
+      + '<div class="metrics">'
+      + '<div class="metric"><div class="metricLabel">已用百分比</div><div class="metricValue">' + escapeHtml(metricValue(account.usagePercentText, '—')) + '</div></div>'
+      + '<div class="metric"><div class="metricLabel">可用百分比</div><div class="metricValue">' + escapeHtml(metricValue(account.availablePercentText, '—')) + '</div></div>'
+      + '</div>'
+      + '<div class="metaList">'
+      + createMetaRow('来源', account.source || '—')
+      + createMetaRow('额度来源', account.quotaSource || '—')
+      + createMetaRow('过期时间', account.expiresAtText || '—')
+      + createMetaRow('刷新剩余', account.refreshCountdownText || '—')
+      + createMetaRow('刷新时刻', account.refreshAtText || '—')
+      + '</div>'
+      + errorBlock
+      + '<div class="tokenBox">'
+      + '<div class="tokenTop">'
+      + '<div class="tokenHint">accessToken</div>'
+      + '<button class="copyBtn" data-copy-token="' + escapeHtml(account.accessToken || '') + '"' + tokenDisabled + '>复制 Token</button>'
+      + '</div>'
+      + '<pre class="tokenValue">' + escapeHtml(account.accessToken || '该账号没有 accessToken') + '</pre>'
+      + '<div class="tokenPreview">预览：' + escapeHtml(account.accessTokenPreview || '—') + '</div>'
+      + '</div>'
+      + '</article>';
+  }).join('');
+}
+
+async function api(path) {
+  const response = await fetch(path, {
+    method: 'GET',
+    headers: { 'content-type': 'application/json' }
+  });
+  const payload = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error((payload && payload.error && payload.error.message) || '请求失败');
+  }
+
+  return payload;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+function renderOverview(payload) {
+  const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+  const okCount = accounts.filter((item) => item.status === 'ok').length;
+  els.summaryText.textContent = '共 ' + accounts.length + ' 个账号，' + okCount + ' 个额度可读';
+  els.summaryMeta.textContent = '最近刷新：' + (payload.fetchedAt ? new Date(payload.fetchedAt).toLocaleString() : '—');
+  els.boardMetaText.textContent = '额度缓存 TTL：' + String(payload.quotaCacheTtlMs || 0) + 'ms';
+  renderCards(accounts);
+}
+
+async function loadOverview(showNotice) {
+  els.refreshBtn.disabled = true;
+
+  try {
+    const payload = await api('/admin/api/accounts/overview');
+    renderOverview(payload);
+    if (showNotice) {
+      setNotice('ok', '账号信息已刷新。');
+      setTimeout(() => setNotice('', ''), 3000);
+    } else {
+      setNotice('', '');
+    }
+  } catch (error) {
+    els.summaryText.textContent = '账号信息加载失败';
+    els.summaryMeta.textContent = error && error.message ? error.message : String(error);
+    els.boardMetaText.textContent = '请检查只读接口返回';
+    els.accountGrid.innerHTML = '<div class="empty">加载失败，请稍后重试。</div>';
+    setNotice('error', error && error.message ? error.message : String(error));
+  } finally {
+    els.refreshBtn.disabled = false;
+  }
+}
+
+els.refreshBtn.addEventListener('click', () => {
+  loadOverview(true);
+});
+
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-copy-token]');
+
+  if (!button) {
+    return;
+  }
+
+  const token = button.getAttribute('data-copy-token') || '';
+
+  if (!token) {
+    setNotice('error', '该账号没有可复制的 accessToken。');
+    return;
+  }
+
+  const previousText = button.textContent;
+  button.disabled = true;
+
+  try {
+    await copyText(token);
+    button.textContent = '已复制';
+    setNotice('ok', 'accessToken 已复制到剪贴板。');
+    setTimeout(() => {
+      button.textContent = previousText;
+      button.disabled = false;
+    }, 1200);
+  } catch (error) {
+    button.disabled = false;
+    setNotice('error', '复制失败：' + (error && error.message ? error.message : String(error)));
+  }
+});
+
+loadOverview(false);
+</script>
+</body>
+</html>`;
+}
+
 
 async function handleAdminPage(req, res, config) {
-  writeHtml(res, 200, renderAdminPage(config));
+  writeHtml(res, 200, renderAdminAccountsPage(config));
 }
 
 async function handleAdminState(req, res, config, authProvider) {
@@ -1821,6 +2367,20 @@ async function handleAdminState(req, res, config, authProvider) {
  */
 async function handleAdminAccountsQuota(req, res, config, options = {}) {
   const payload = await fetchAccountsQuota(config, options);
+  writeJson(res, 200, payload);
+}
+
+/**
+ * Handles the read-only account overview endpoint used by the replacement admin page.
+ *
+ * @param {import("node:http").IncomingMessage} req Incoming HTTP request.
+ * @param {import("node:http").ServerResponse} res Outgoing HTTP response.
+ * @param {object} config Runtime configuration object.
+ * @param {object} [options] Optional test hooks forwarded to the overview fetcher.
+ * @returns {Promise<void>} Resolves after the JSON response has been written.
+ */
+async function handleAdminAccountsOverview(req, res, config, options = {}) {
+  const payload = await fetchAccountsOverview(config, options);
   writeJson(res, 200, payload);
 }
 
@@ -2335,6 +2895,7 @@ async function handleAdminAccountLoginStatus(req, res, config, url) {
 module.exports = {
   handleAdminPage,
   handleAdminState,
+  handleAdminAccountsOverview,
   handleAdminAccountsQuota,
   handleAdminSnapshotCreate,
   handleAdminSnapshotActivate,
