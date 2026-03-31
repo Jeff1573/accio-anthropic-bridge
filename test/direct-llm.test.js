@@ -164,6 +164,18 @@ test("DirectLlmClient converts SSE logical errors into structured upstream error
   global.fetch = originalFetch;
 });
 
+test("UpstreamSseError collapses non-HTTP upstream codes into valid bridge status", () => {
+  const error = new UpstreamSseError({
+    turn_complete: true,
+    error_code: "5015",
+    error_message: "user not activated"
+  });
+
+  assert.equal(error.status, 502);
+  assert.equal(error.type, "authentication_error");
+  assert.equal(error.message, "user not activated");
+});
+
 
 test("extractThinkingConfigFromAnthropic preserves budget tokens", () => {
   const thinking = extractThinkingConfigFromAnthropic({

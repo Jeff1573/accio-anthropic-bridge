@@ -6,10 +6,12 @@ const path = require("node:path");
 const { loadAccountsFile } = require("./accounts-file");
 
 const ACCOUNT_QUOTA_API_VERSION = "0.5.0"; // Upstream quota endpoint currently expects this app version.
+const SESSION_PROBE_MODEL = "gpt-5.4"; // Keep probe requests tiny while exercising the real chat capability.
 const DEFAULT_UTDID = "local-inspect"; // Fallback identifier when the local Accio utdid file is unavailable.
 const DEFAULT_ACCOUNT_QUOTA_CACHE_TTL_MS = 30 * 1000; // Keep short to avoid stale countdowns in admin polling.
 const DEFAULT_ACCOUNT_QUOTA_TIMEOUT_MS = 8 * 1000; // Match lightweight admin diagnostics expectations.
 const accountQuotaCache = new Map();
+const accountSessionProbeCache = new Map();
 
 /**
  * Resolves the upstream Phoenix gateway origin from the configured direct LLM URL.
@@ -191,6 +193,21 @@ function formatAccessTokenPreview(accessToken) {
 }
 
 /**
+ * Parses a JSON string defensively for upstream responses that may return partial or malformed payloads.
+ *
+ * @param {string} value Raw JSON string.
+ * @param {any} fallback Value to return when parsing fails.
+ * @returns {any} Parsed value or the provided fallback.
+ */
+function safeJsonParse(value, fallback = null) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return fallback;
+  }
+}
+
+/**
  * Builds the cache key for one account-token pair so token rotation invalidates the old cache line.
  *
  * @param {{id: string, accessToken: string}} account Normalized account descriptor.
@@ -271,6 +288,86 @@ function buildQuotaErrorResult(account, status, error) {
 }
 
 /**
+ * Builds one session probe result while keeping the response schema stable for the admin board.
+ *
+ * @param {"ok"|"error"|"skipped"} status High-level session status.
+ * @param {"live"|"cache"|"none"} source Probe source marker.
+ * @param {string} text Human-readable session status text.
+ * @param {{type: string, message: string}|null} error Structured session error payload.
+ * @returns {{status: string, source: string, text: string, error: object|null}} Session probe result.
+ */
+function buildSessionProbeResult(status, source, text, error = null) {
+  return {
+    status,
+    source,
+    text,
+    error
+  };
+}
+
+/**
+ * Extracts JSON data frames from an SSE response body.
+ *
+ * @param {string} text Raw SSE response text.
+ * @returns {object[]} Parsed JSON frames.
+ */
+function parseSseJsonFrames(text) {
+  const frames = [];
+
+  for (const block of String(text || "").split("\n\n")) {
+    const dataLines = block
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .filter(Boolean);
+
+    if (dataLines.length === 0) {
+      continue;
+    }
+
+    const payload = safeJsonParse(dataLines.join("\n"), null);
+
+    if (payload && typeof payload === "object") {
+      frames.push(payload);
+    }
+  }
+
+  return frames;
+}
+
+/**
+ * Converts an upstream SSE error frame into a UI-friendly session result.
+ *
+ * @param {object} frame Parsed SSE frame containing an error payload.
+ * @param {"live"|"cache"} source Probe source marker.
+ * @returns {{status: string, source: string, text: string, error: object}} Session probe result.
+ */
+function buildSessionErrorFromFrame(frame, source) {
+  const code = frame && frame.error_code ? String(frame.error_code).trim() : "";
+  const message = frame && frame.error_message ? String(frame.error_message).trim() : "会话探测失败";
+  const normalized = message.toLowerCase();
+
+  if (code === "5015" || normalized.includes("not activated")) {
+    return buildSessionProbeResult("error", source, "未激活", {
+      type: "user_not_activated",
+      message
+    });
+  }
+
+  if (code === "401" || code === "402" || code === "403" || normalized.includes("unauthorized")) {
+    return buildSessionProbeResult("error", source, "未授权", {
+      type: "authentication_error",
+      message
+    });
+  }
+
+  return buildSessionProbeResult("error", source, "会话异常", {
+    type: "session_probe_failed",
+    message
+  });
+}
+
+/**
  * Builds one card DTO for the read-only admin overview page.
  *
  * @param {object} account Normalized account descriptor.
@@ -303,6 +400,29 @@ function buildAccountOverviewItem(account, quotaResult) {
     error: quotaResult ? quotaResult.error : {
       type: "quota_result_missing",
       message: "额度结果缺失"
+    }
+  };
+}
+
+/**
+ * Builds one account overview card by combining quota and session signals.
+ *
+ * @param {object} account Normalized account descriptor.
+ * @param {object} quotaResult Matching quota probe result.
+ * @param {object} sessionResult Matching session probe result.
+ * @returns {object} Aggregated account card payload.
+ */
+function buildAccountOverviewWithSession(account, quotaResult, sessionResult) {
+  const item = buildAccountOverviewItem(account, quotaResult);
+
+  return {
+    ...item,
+    sessionStatus: sessionResult ? sessionResult.status : "error",
+    sessionStatusText: sessionResult ? sessionResult.text : "会话结果缺失",
+    sessionProbeSource: sessionResult ? sessionResult.source : "none",
+    sessionError: sessionResult ? sessionResult.error : {
+      type: "session_result_missing",
+      message: "会话结果缺失"
     }
   };
 }
@@ -389,6 +509,163 @@ async function requestAccountQuota(config, account, options = {}) {
   return {
     usagePercent,
     refreshCountdownSeconds: Math.max(0, Math.floor(refreshCountdownSeconds))
+  };
+}
+
+/**
+ * Probes the upstream chat endpoint directly to determine whether the account can actually start a session.
+ *
+ * @param {object} config Runtime configuration object.
+ * @param {{id: string, name: string, accessToken: string}} account Normalized account descriptor.
+ * @param {{fetchImpl?: Function, timeoutMs?: number}} options Optional test hooks and overrides.
+ * @returns {Promise<{status: string, source: string, text: string, error: object|null}>} Session probe result.
+ */
+async function requestAccountSessionProbe(config, account, options = {}) {
+  const fetchImpl = options.fetchImpl || global.fetch;
+
+  if (typeof fetchImpl !== "function") {
+    return buildSessionProbeResult("error", "none", "探测失败", {
+      type: "session_probe_failed",
+      message: "global.fetch is not available"
+    });
+  }
+
+  const timeoutMs = Math.max(
+    1,
+    Number(options.timeoutMs ?? config.accountQuotaTimeoutMs ?? DEFAULT_ACCOUNT_QUOTA_TIMEOUT_MS)
+  );
+  const upstreamUrl = `${String(config.directLlmBaseUrl || "https://phoenix-gw.alibaba.com/api/adk/llm").replace(/\/$/, "")}/generateContent`;
+
+  let response;
+
+  try {
+    response = await fetchImpl(upstreamUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "text/event-stream"
+      },
+      body: JSON.stringify({
+        model: SESSION_PROBE_MODEL,
+        request_id: `session-probe-${Date.now()}-${account.id}`,
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: "只回复ok" }]
+          }
+        ],
+        tools: [],
+        max_output_tokens: 8,
+        stop_sequences: [],
+        token: account.accessToken
+      }),
+      signal: AbortSignal.timeout(timeoutMs)
+    });
+  } catch (error) {
+    return buildSessionProbeResult("error", "live", "探测失败", {
+      type: "session_probe_failed",
+      message: error && error.message ? String(error.message) : String(error)
+    });
+  }
+
+  const responseText = await response.text();
+
+  if (!response.ok) {
+    return buildSessionProbeResult("error", "live", "探测失败", {
+      type: "session_probe_failed",
+      message: `上游会话请求失败：HTTP ${response.status}`
+    });
+  }
+
+  const frames = parseSseJsonFrames(responseText);
+  const errorFrame = frames.find((frame) => frame && (frame.error_code || frame.error_message));
+
+  if (errorFrame) {
+    return buildSessionErrorFromFrame(errorFrame, "live");
+  }
+
+  if (frames.length > 0) {
+    return buildSessionProbeResult("ok", "live", "会话正常", null);
+  }
+
+  return buildSessionProbeResult("error", "live", "探测失败", {
+    type: "invalid_session_response",
+    message: "上游会话探测未返回有效 SSE 帧"
+  });
+}
+
+/**
+ * Reads all configured file accounts and returns their session probe results.
+ *
+ * @param {object} config Runtime configuration object.
+ * @param {{fetchImpl?: Function, nowFn?: Function, cacheTtlMs?: number, timeoutMs?: number}} options Optional test hooks and overrides.
+ * @returns {Promise<{fetchedAt: string, cacheTtlMs: number, accounts: object[]}>} Stable session probe payload.
+ */
+async function fetchAccountsSessionProbe(config, options = {}) {
+  const nowFn = typeof options.nowFn === "function" ? options.nowFn : () => Date.now();
+  const startedAtMs = nowFn();
+  const cacheTtlMs = Math.max(
+    0,
+    Number(options.cacheTtlMs ?? config.accountQuotaCacheTtlMs ?? DEFAULT_ACCOUNT_QUOTA_CACHE_TTL_MS)
+  );
+  const state = loadAccountsFile(config.accountsPath);
+  const results = [];
+
+  if (cacheTtlMs <= 0) {
+    accountSessionProbeCache.clear();
+  } else {
+    for (const [cacheKey, entry] of accountSessionProbeCache.entries()) {
+      if (startedAtMs - entry.createdAtMs >= cacheTtlMs) {
+        accountSessionProbeCache.delete(cacheKey);
+      }
+    }
+  }
+
+  for (const [index, rawAccount] of state.accounts.entries()) {
+    const account = normalizeQuotaAccount(rawAccount, index);
+
+    if (!account.enabled) {
+      results.push(buildSessionProbeResult("skipped", "none", "已跳过", {
+        type: "disabled",
+        message: "账号已禁用，跳过会话探测"
+      }));
+      continue;
+    }
+
+    if (!account.accessToken) {
+      results.push(buildSessionProbeResult("skipped", "none", "已跳过", {
+        type: "missing_access_token",
+        message: "账号缺少 accessToken，跳过会话探测"
+      }));
+      continue;
+    }
+
+    const cacheKey = buildAccountQuotaCacheKey(account);
+    const cached = accountSessionProbeCache.get(cacheKey);
+
+    if (cached && cacheTtlMs > 0 && startedAtMs - cached.createdAtMs < cacheTtlMs) {
+      results.push({
+        ...cached.value,
+        source: "cache"
+      });
+      continue;
+    }
+
+    const liveResult = await requestAccountSessionProbe(config, account, options);
+    accountSessionProbeCache.set(cacheKey, {
+      createdAtMs: nowFn(),
+      value: {
+        ...liveResult,
+        source: liveResult.source === "none" ? "none" : "live"
+      }
+    });
+    results.push(liveResult);
+  }
+
+  return {
+    fetchedAt: new Date(startedAtMs).toISOString(),
+    cacheTtlMs,
+    accounts: results
   };
 }
 
@@ -498,6 +775,7 @@ async function fetchAccountsQuota(config, options = {}) {
 async function fetchAccountsOverview(config, options = {}) {
   const state = loadAccountsFile(config.accountsPath);
   const quotaPayload = await fetchAccountsQuota(config, options);
+  const sessionPayload = await fetchAccountsSessionProbe(config, options);
   const accounts = state.accounts.map((rawAccount, index) => {
     const normalized = normalizeQuotaAccount(rawAccount, index);
     const expiresAt = Number(rawAccount && rawAccount.expiresAt || 0) || null;
@@ -506,13 +784,18 @@ async function fetchAccountsOverview(config, options = {}) {
       expiresAt
     };
 
-    return buildAccountOverviewItem(account, quotaPayload.accounts[index] || null);
+    return buildAccountOverviewWithSession(
+      account,
+      quotaPayload.accounts[index] || null,
+      sessionPayload.accounts[index] || null
+    );
   });
 
   return {
     ok: true,
     fetchedAt: quotaPayload.fetchedAt,
     quotaCacheTtlMs: quotaPayload.cacheTtlMs,
+    sessionCacheTtlMs: sessionPayload.cacheTtlMs,
     accounts
   };
 }
@@ -524,10 +807,12 @@ async function fetchAccountsOverview(config, options = {}) {
  */
 function clearAccountQuotaCache() {
   accountQuotaCache.clear();
+  accountSessionProbeCache.clear();
 }
 
 module.exports = {
   fetchAccountsOverview,
+  fetchAccountsSessionProbe,
   fetchAccountsQuota,
   formatAccessTokenPreview,
   formatQuotaCountdownText,

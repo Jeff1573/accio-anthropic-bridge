@@ -2187,7 +2187,7 @@ function createMetaRow(label, value) {
 
 function createStatusPill(account) {
   if (account.status === 'ok') {
-    return '<span class="pill good">可用</span>';
+    return '<span class="pill good">额度正常</span>';
   }
 
   if (account.status === 'skipped') {
@@ -2195,6 +2195,26 @@ function createStatusPill(account) {
   }
 
   return '<span class="pill bad">异常</span>';
+}
+
+function createSessionPill(account) {
+  if (account.sessionStatus === 'ok') {
+    return '<span class="pill good">会话正常</span>';
+  }
+
+  if (account.sessionStatus === 'skipped') {
+    return '<span class="pill warn">会话跳过</span>';
+  }
+
+  if (account.sessionError && account.sessionError.type === 'user_not_activated') {
+    return '<span class="pill warn">未激活</span>';
+  }
+
+  if (account.sessionError && account.sessionError.type === 'authentication_error') {
+    return '<span class="pill bad">未授权</span>';
+  }
+
+  return '<span class="pill bad">会话异常</span>';
 }
 
 function renderCards(accounts) {
@@ -2206,8 +2226,11 @@ function renderCards(accounts) {
   els.accountGrid.innerHTML = accounts.map((account) => {
     const enabledPill = account.enabled ? '<span class="pill good">启用</span>' : '<span class="pill warn">禁用</span>';
     const tokenDisabled = !account.accessToken ? ' disabled' : '';
-    const errorBlock = account.error
+    const quotaErrorBlock = account.error
       ? '<div class="errorBox">' + escapeHtml(account.error.message || '未知错误') + '</div>'
+      : '';
+    const sessionErrorBlock = account.sessionError
+      ? '<div class="errorBox">' + escapeHtml('会话探测：' + (account.sessionError.message || '未知错误')) + '</div>'
       : '';
 
     return '<article class="card">'
@@ -2216,7 +2239,7 @@ function renderCards(accounts) {
       + '<h2>' + escapeHtml(account.name || account.id || '未命名账号') + '</h2>'
       + '<div class="cardSub">' + escapeHtml(account.id || '—') + '</div>'
       + '</div>'
-      + '<div class="stack">' + createStatusPill(account) + enabledPill + '</div>'
+      + '<div class="stack">' + createStatusPill(account) + createSessionPill(account) + enabledPill + '</div>'
       + '</div>'
       + '<div class="metrics">'
       + '<div class="metric"><div class="metricLabel">已用百分比</div><div class="metricValue">' + escapeHtml(metricValue(account.usagePercentText, '—')) + '</div></div>'
@@ -2225,11 +2248,14 @@ function renderCards(accounts) {
       + '<div class="metaList">'
       + createMetaRow('来源', account.source || '—')
       + createMetaRow('额度来源', account.quotaSource || '—')
+      + createMetaRow('会话状态', account.sessionStatusText || '—')
+      + createMetaRow('会话来源', account.sessionProbeSource || '—')
       + createMetaRow('过期时间', account.expiresAtText || '—')
       + createMetaRow('刷新剩余', account.refreshCountdownText || '—')
       + createMetaRow('刷新时刻', account.refreshAtText || '—')
       + '</div>'
-      + errorBlock
+      + quotaErrorBlock
+      + sessionErrorBlock
       + '<div class="tokenBox">'
       + '<div class="tokenTop">'
       + '<div class="tokenHint">accessToken</div>'
@@ -2276,10 +2302,11 @@ async function copyText(text) {
 
 function renderOverview(payload) {
   const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
-  const okCount = accounts.filter((item) => item.status === 'ok').length;
-  els.summaryText.textContent = '共 ' + accounts.length + ' 个账号，' + okCount + ' 个额度可读';
+  const quotaOkCount = accounts.filter((item) => item.status === 'ok').length;
+  const sessionOkCount = accounts.filter((item) => item.sessionStatus === 'ok').length;
+  els.summaryText.textContent = '共 ' + accounts.length + ' 个账号，' + quotaOkCount + ' 个额度正常，' + sessionOkCount + ' 个会话正常';
   els.summaryMeta.textContent = '最近刷新：' + (payload.fetchedAt ? new Date(payload.fetchedAt).toLocaleString() : '—');
-  els.boardMetaText.textContent = '额度缓存 TTL：' + String(payload.quotaCacheTtlMs || 0) + 'ms';
+  els.boardMetaText.textContent = '额度缓存 TTL：' + String(payload.quotaCacheTtlMs || 0) + 'ms · 会话缓存 TTL：' + String(payload.sessionCacheTtlMs || 0) + 'ms';
   renderCards(accounts);
 }
 

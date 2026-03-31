@@ -8,6 +8,7 @@ const assert = require("node:assert/strict");
 
 const {
   fetchAccountsOverview,
+  fetchAccountsSessionProbe,
   fetchAccountsQuota,
   formatAccessTokenPreview,
   formatQuotaCountdownText,
@@ -56,6 +57,23 @@ function createJsonResponse(payload, status = 200) {
     status,
     async text() {
       return JSON.stringify(payload);
+    }
+  };
+}
+
+/**
+ * Builds a minimal text response object for SSE-like upstream session probe tests.
+ *
+ * @param {string} text Response text returned by text().
+ * @param {number} [status=200] HTTP status code.
+ * @returns {object} Mocked fetch response.
+ */
+function createTextResponse(text, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async text() {
+      return text;
     }
   };
 }
@@ -362,6 +380,46 @@ test("fetchAccountsQuota allows empty x-cna when cookie has no cna", async () =>
   }
 });
 
+test("fetchAccountsSessionProbe distinguishes active and not-activated accounts", async () => {
+  const { config, cleanup } = createTempQuotaConfig({
+    accounts: [
+      {
+        id: "acct_ok",
+        name: "正常账号",
+        accessToken: "token_session_ok"
+      },
+      {
+        id: "acct_inactive",
+        name: "未激活账号",
+        accessToken: "token_session_inactive"
+      }
+    ]
+  });
+
+  try {
+    const payload = await fetchAccountsSessionProbe(config, {
+      fetchImpl: async (url, options) => {
+        const body = JSON.parse(options.body || "{}");
+
+        if (body.token === "token_session_ok") {
+          return createTextResponse('data:{"turn_complete":true}\n\n');
+        }
+
+        return createTextResponse('data:{"turn_complete":true,"error_code":"5015","error_message":"user not activated"}\n\n');
+      }
+    });
+
+    assert.equal(payload.accounts[0].status, "ok");
+    assert.equal(payload.accounts[0].text, "会话正常");
+    assert.equal(payload.accounts[0].source, "live");
+    assert.equal(payload.accounts[1].status, "error");
+    assert.equal(payload.accounts[1].text, "未激活");
+    assert.equal(payload.accounts[1].error.type, "user_not_activated");
+  } finally {
+    cleanup();
+  }
+});
+
 test("fetchAccountsOverview merges file accounts with quota-derived fields", async () => {
   const { config, cleanup } = createTempQuotaConfig({
     accounts: [
@@ -390,8 +448,8 @@ test("fetchAccountsOverview merges file accounts with quota-derived fields", asy
 
   try {
     const payload = await fetchAccountsOverview(config, {
-      fetchImpl: async (url) => {
-        if (String(url).includes("token_overview_abcdefghijklmnopqrstuvwxyz")) {
+      fetchImpl: async (url, options = {}) => {
+        if (String(url).includes("/api/entitlement/quota") && String(url).includes("token_overview_abcdefghijklmnopqrstuvwxyz")) {
           return createJsonResponse({
             success: true,
             data: {
@@ -399,6 +457,14 @@ test("fetchAccountsOverview merges file accounts with quota-derived fields", asy
               refreshCountdownSeconds: 180
             }
           });
+        }
+
+        if (String(url).includes("/api/adk/llm/generateContent")) {
+          const body = JSON.parse(options.body || "{}");
+
+          if (body.token === "token_overview_abcdefghijklmnopqrstuvwxyz") {
+            return createTextResponse('data:{"turn_complete":true,"error_code":"5015","error_message":"user not activated"}\n\n');
+          }
         }
 
         return createJsonResponse({ success: false, data: {} });
@@ -417,10 +483,15 @@ test("fetchAccountsOverview merges file accounts with quota-derived fields", asy
     assert.equal(payload.accounts[0].accessToken, "token_overview_abcdefghijklmnopqrstuvwxyz");
     assert.equal(payload.accounts[0].accessTokenPreview, "token_over...stuvwxyz");
     assert.equal(payload.accounts[0].expiresAtText, "2026-04-01 08:30:00");
+    assert.equal(payload.accounts[0].sessionStatus, "error");
+    assert.equal(payload.accounts[0].sessionStatusText, "未激活");
+    assert.equal(payload.accounts[0].sessionError.type, "user_not_activated");
     assert.equal(payload.accounts[1].status, "skipped");
     assert.equal(payload.accounts[1].error.type, "disabled");
+    assert.equal(payload.accounts[1].sessionStatus, "skipped");
     assert.equal(payload.accounts[2].status, "skipped");
     assert.equal(payload.accounts[2].error.type, "missing_access_token");
+    assert.equal(payload.accounts[2].sessionStatus, "skipped");
   } finally {
     cleanup();
   }
@@ -472,13 +543,19 @@ test("handleAdminAccountsOverview writes aggregated card data", async () => {
 
   try {
     await handleAdminAccountsOverview({}, res, config, {
-      fetchImpl: async () => createJsonResponse({
-        success: true,
-        data: {
-          usagePercent: 15,
-          refreshCountdownSeconds: 45
+      fetchImpl: async (url) => {
+        if (String(url).includes("/api/entitlement/quota")) {
+          return createJsonResponse({
+            success: true,
+            data: {
+              usagePercent: 15,
+              refreshCountdownSeconds: 45
+            }
+          });
         }
-      })
+
+        return createTextResponse('data:{"turn_complete":true}\n\n');
+      }
     });
 
     const body = JSON.parse(res.body);
@@ -486,6 +563,7 @@ test("handleAdminAccountsOverview writes aggregated card data", async () => {
     assert.equal(body.ok, true);
     assert.equal(body.accounts[0].availablePercent, 85);
     assert.equal(body.accounts[0].accessToken, "token_overview_handler");
+    assert.equal(body.accounts[0].sessionStatus, "ok");
   } finally {
     cleanup();
   }
@@ -502,8 +580,12 @@ test("handleAdminPage returns the replacement read-only board HTML", async () =>
     assert.match(res.body, /账号信息看板/);
     assert.match(res.body, /\/admin\/api\/accounts\/overview/);
     assert.match(res.body, /复制 Token/);
+    assert.match(res.body, /额度正常/);
+    assert.match(res.body, /会话状态/);
+    assert.match(res.body, /会话正常/);
     assert.doesNotMatch(res.body, /添加账号登录/);
     assert.doesNotMatch(res.body, /保存当前账号/);
+    assert.doesNotMatch(res.body, />可用</);
     assert.doesNotMatch(res.body, /data-activate-snapshot/);
     assert.doesNotMatch(res.body, /\/admin\/api\/state/);
   } finally {

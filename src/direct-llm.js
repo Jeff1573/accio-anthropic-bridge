@@ -711,8 +711,14 @@ function mapUpstreamErrorStatus(errorCode) {
     return 429;
   }
 
-  if (code >= 500) {
+  if (code >= 500 && code <= 599) {
     return code;
+  }
+
+  // Some upstream logical error codes are product-specific integers like 5015.
+  // They are not valid HTTP status codes, so we collapse them to a gateway error.
+  if (code >= 500) {
+    return 502;
   }
 
   return 502;
@@ -721,7 +727,13 @@ function mapUpstreamErrorStatus(errorCode) {
 function classifyUpstreamSseErrorType(code, message) {
   const normalized = String(message || "").toLowerCase();
 
-  if (code === "401" || code === "402" || code === "403" || normalized.includes("unauthorized")) {
+  if (
+    code === "401" ||
+    code === "402" ||
+    code === "403" ||
+    normalized.includes("unauthorized") ||
+    normalized.includes("not activated")
+  ) {
     return "authentication_error";
   }
 
